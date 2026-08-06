@@ -1,0 +1,14 @@
+.DS_Store
+.ipynb_checkpoints/
+
+# Secrets — copy .env.example to .env and fill in real values, never commit .env
+.env
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Python cache
+__pycache__/
+*.pyc
