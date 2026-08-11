@@ -9,14 +9,24 @@ No public API. Requires:
 
 import os
 import xml.etree.ElementTree as ET
+from typing import Iterator
 
 NS = "http://www.drugbank.ca"   # DrugBank XML namespace
 
 
-def _load_db(xml_path: str):
-    """Parse the DrugBank XML and return the root element."""
-    tree = ET.parse(xml_path)
-    return tree.getroot()
+def _iter_drugs(xml_path: str) -> Iterator[ET.Element]:
+    """Stream <drug> elements one at a time instead of loading the whole file
+    into memory. The full DrugBank dump is ~1.9GB, and a full ET.parse() of it
+    can need several times that in RAM as a DOM tree — confirmed to OOM-kill
+    the process in a memory-constrained environment (a Docker container with
+    ~7.5GB available). iterparse() builds the tree incrementally as it reads,
+    so calling .clear() on each <drug> right after use keeps peak memory
+    roughly constant regardless of file size, instead of scaling with it.
+    """
+    for event, elem in ET.iterparse(xml_path, events=("end",)):
+        if elem.tag == f"{{{NS}}}drug":
+            yield elem
+            elem.clear()
 
 
 def search_drugbank(
@@ -42,11 +52,10 @@ def search_drugbank(
             ],
         }
 
-    root  = _load_db(xml_path)
     query = query.lower()
     drugs = []
 
-    for drug in root.findall(f"{{{NS}}}drug"):
+    for drug in _iter_drugs(xml_path):
         name = drug.findtext(f"{{{NS}}}name", "") or ""
         if query not in name.lower():
             continue
