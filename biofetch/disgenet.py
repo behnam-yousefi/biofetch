@@ -13,6 +13,7 @@ disease query needs a DisGeNET disease ID, not a free-text name, which is why
 this module resolves one via "/entity/disease" first.
 """
 
+import difflib
 import os
 import httpx
 
@@ -36,8 +37,19 @@ def _resolve_disease_id(query: str, headers: dict) -> tuple[str | None, str | No
     """Resolve a free-text disease name to a DisGeNET disease ID via
     /entity/disease's disease_free_text_search_string param (the only way to
     query DisGeNET by name — /gda/summary itself only accepts a structured
-    disease ID). Takes the highest-search_rank match. Returns
-    (disease_id, matched_name), or (None, None) if nothing matched.
+    disease ID).
+
+    Ranks candidates by string similarity to the query, NOT the API's own
+    documented `search_rank` field — a live test call (searching "cystic
+    fibrosis") showed `search_rank` comes back NaN for every candidate
+    despite the docs saying it's populated for free-text search, and Python's
+    max() over all-NaN keys silently returns whichever candidate happened to
+    be listed first rather than the best match (comparisons against NaN are
+    always False, so nothing ever looks "better" than the first). That
+    produced a real wrong-disease match ("Fibrosis" instead of "Cystic
+    Fibrosis") in testing, hence the client-side ranking here instead.
+
+    Returns (disease_id, matched_name), or (None, None) if nothing matched.
     """
     resp = httpx.get(
         f"{BASE_URL}/entity/disease",
@@ -51,7 +63,11 @@ def _resolve_disease_id(query: str, headers: dict) -> tuple[str | None, str | No
     if not candidates:
         return None, None
 
-    best = max(candidates, key=lambda c: c.get("search_rank") or 0)
+    def similarity(c: dict) -> float:
+        name = c.get("name") or ""
+        return difflib.SequenceMatcher(None, query.lower(), name.lower()).ratio()
+
+    best = max(candidates, key=similarity)
     disease_umls_cui = best.get("diseaseUMLSCUI")
     if not disease_umls_cui:
         return None, None

@@ -59,10 +59,17 @@ description. Confirmed fields relevant to name resolution:
   "a disease" but were not designed with matching field names.
 - `diseaseUMLSCUI` (string) — same field name as in `/gda/summary`'s DTO, used
   to build the `UMLS_<cui>` identifier `/gda/summary`'s `disease` param expects.
-- `search_rank` (float) — relevance score, **only non-null when
-  `disease_free_text_search_string` was the query param used** (i.e. not
-  present when querying by `disease` ID directly). Take the max across
-  candidates to pick the best free-text match.
+- `search_rank` (float) — documented as relevance score, populated only for
+  free-text search. **In practice (confirmed via a live authenticated call
+  searching "cystic fibrosis"), this came back `NaN` for every single
+  candidate** — the field exists but isn't actually computed, at least not
+  for this account/tier. Do not rank by it: Python's `max(..., key=...)`
+  over all-NaN keys silently returns whichever item is first in the list
+  (NaN comparisons are always `False`, so nothing ever beats the first
+  candidate) — this produced a real wrong-disease match ("Fibrosis" instead
+  of "Cystic Fibrosis") before it was caught. `biofetch/disgenet.py` ranks
+  candidates by `difflib.SequenceMatcher` string similarity to the query
+  instead, which correctly picks the exact/closest name match.
 - `synonyms` (array) — not used currently, but available if fuzzy-name
   disambiguation ever needs alternate names to show the caller.
 
@@ -73,7 +80,8 @@ description. Confirmed fields relevant to name resolution:
 1. Both gene and disease queries go through `/gda/summary`.
 2. Gene path: `gene_symbol=<query>` — unchanged, was already correct.
 3. Disease path: resolves via `/entity/disease?disease_free_text_search_string=<query>`
-   first (highest `search_rank` match, using its `diseaseUMLSCUI` field), then
+   first (best string-similarity match — see `search_rank` note above for
+   why not the API's own ranking — using its `diseaseUMLSCUI` field), then
    queries `/gda/summary?disease=UMLS_<cui>`. The matched disease name is
    surfaced back in a `warnings` entry when it differs from the query string,
    so the caller can tell if DisGeNET matched something other than intended.
