@@ -1,7 +1,12 @@
 # DisGeNET REST API — reference notes
 
 Source: https://disgenet.com/interactive-console (Swagger console, verified live
-2026-08-11). Base URL: `https://api.disgenet.com/api/v1`. Auth: `Authorization:
+2026-08-11; endpoints below re-verified 2026-08-17 via the raw OpenAPI spec —
+the console embeds an iframe at `https://api.disgenet.com/doc/swagger`, which
+itself loads its spec from `https://api.disgenet.com/v2/api-docs`, a plain
+JSON document — fetching that directly is far more reliable than scrolling the
+console's custom React UI, and gives the exact request/response schema instead
+of prose). Base URL: `https://api.disgenet.com/api/v1`. Auth: `Authorization:
 Bearer <DISGENET_API_KEY>` header (register/generate key at disgenet.com).
 
 `biofetch/disgenet.py`'s original implementation targeted `/gda/disease` and
@@ -19,11 +24,11 @@ the ground truth to fix that, and a map of what else the API offers.
 | 2_vda | `/vda/summary`, `/vda/evidence`, `/vda/shared` | GET | Variant-disease associations (SNP/variant level, not gene level) | Variant identifiers (dbSNP etc.) | Not explored — likely lower priority; relevant only if the agent needs variant-level (not gene-level) precision-medicine queries |
 | 3_dda | `/dda` | GET | Disease-disease associations (shared-gene based, Jaccard index) | Disease identifiers | Not explored — candidate for repurposing/comorbidity reasoning |
 | 4_entity | `/entity/disease` | GET | Resolve/describe disease(s) — **this is the free-text name lookup DisGeNET-side queries need** | `disease` (ID) **or** `disease_free_text_search_string` (plain text, e.g. "systemic lupus erythematosus") — response includes a `search_rank` relevance score per match when using free-text search | **Verified** — confirmed `disease_free_text_search_string` param exists and is exactly what's needed |
-| 4_entity | `/entity/gene` | GET | Resolve/describe gene(s) | Presumed analogous to `/entity/disease` (ID or free-text) — not yet confirmed | Not yet verified — likely has a similar free-text param, worth checking before relying on it |
-| 4_entity | `/entity/chemical` | GET | Resolve/describe chemical(s)/drug(s) | Presumed analogous — chemical ID formats include `DRUGBANK_<id>`, `CHEMBL_<id>`, `MESH_<id>`, `PUBCHEM_<id>` (per `/gda/summary`'s `chemical_id` param docs) — worth checking for a free-text drug-name param, which could help resolve drug names before cross-referencing DrugBank | Not yet verified |
+| 4_entity | `/entity/gene` | GET | Resolve/describe gene(s) | `gene_free_text_search_string` (plain text, single-gene query only) **or** `gene_ncbi_id`/`gene_ensembl_id`/`gene_symbol`/`uniprot_id` | **Verified** — confirmed `gene_free_text_search_string` exists via the raw spec; response is `GeneDTO`, same `search_rank`-is-NaN issue as `/entity/disease` (confirmed live) — see response shape section below |
+| 4_entity | `/entity/chemical` | GET | Resolve/describe chemical(s)/drug(s) | `chemical_name` (plain text, single-chemical query only) **or** `chemical_id` (formats: `DRUGBANK_<id>`, `CHEMBL_<id>`, `MESH_<id>`, `PUBCHEM_<id>`) | **Verified** — confirmed `chemical_name` free-text param exists via the raw spec; response is `ChemicalDTO` |
 | 4_entity | `/entity/publication` | GET | Properties of publication(s) | Not explored | Not explored |
 | 4_entity | `/entity/variant` | GET | Properties of variant(s) | Not explored | Not explored |
-| 5_enrichment | `/enrichment/gene` | POST | Gene-set enrichment — given a **list** of genes, returns over-represented disease/pathway associations | POST body, not yet inspected in detail | **Candidate new tool** — distinct capability from all current biofetch tools (set-level reasoning, not single-entity lookup). Useful for interpreting a gene signature/hit-list. |
+| 5_enrichment | `/enrichment/gene` | POST | Gene-set enrichment — given a **list** of genes, returns over-represented disease associations, ordered by ascending p-value | JSON body (`EnrichmentRequest`): one of `geneNCBIList`/`geneENSEMBLList`/`geneHGNCList`/`geneUniProtList` (comma-sep, up to 4000), optional `disList` (restrict to specific diseases), `source`, `minScore`/`maxScore`, `maxPvalue`, `commonGenes`, `pageNumber` | **Verified, live-tested** — confirmed working with a real gene list (CFTR/BRCA1/TP53 → 4843 disease associations, correctly ordered by p-value, correct `intersection` sets). Distinct capability from all current biofetch tools (set-level reasoning, not single-entity lookup) — the standout candidate for a new tool. |
 | 5_enrichment | `/enrichment/variant` | POST | Variant-set enrichment | Not explored | Lower priority, same reasoning as vda |
 | 6_embeddings | (not explored) | ? | "DISGENET normalization" — likely ML-embedding-based similarity | Not explored | Unclear value — flagged for future investigation, not evaluated |
 
@@ -73,6 +78,46 @@ description. Confirmed fields relevant to name resolution:
 - `synonyms` (array) — not used currently, but available if fuzzy-name
   disambiguation ever needs alternate names to show the caller.
 
+## `/enrichment/gene` request/response shape (confirmed via raw spec + a live test call)
+
+Request body (`EnrichmentRequest`, JSON, not query params — this is a `POST`):
+exactly one gene-list field is needed: `geneHGNCList` (symbols, e.g.
+`"CFTR,BRCA1,TP53"`), `geneNCBIList`, `geneENSEMBLList`, or `geneUniProtList`.
+Everything else is optional filtering (`disList` to restrict to specific
+diseases, `source`, `minScore`/`maxScore`, `maxPvalue`, `commonGenes`,
+`pageNumber`).
+
+Response is a bare JSON array of `GeneEnrichmentDTO`, ordered by ascending
+p-value — confirmed live with `geneHGNCList=CFTR,BRCA1,TP53` (4843 results,
+no pagination cap hit despite the docs' TRIAL-tier "top-30" language, so
+that limit apparently doesn't apply to this account/tier):
+
+- `diseaseName`, `diseaseUMLSCUI` — same disease-identity fields as elsewhere
+- `pvalue`, `oddsRatio`, `oddsRatioCI` (`[lower, upper]`) — statistical significance
+- `intersection` (array of gene symbols actually shared with the disease),
+  `intersectionSize`, `geneRatio`, `bgRatio`
+- `numGenesAssociatedToDisease`, `totalGenesSource`, `source`
+
+No pagination cap was hit in testing, but a biofetch wrapper should still
+apply its own `max_results` truncation (same convention as every other
+biofetch tool) — a broad gene list against `ALL` sources could plausibly
+return thousands of rows, same as it did here for just 3 genes.
+
+## `/entity/gene` and `/entity/chemical` response shape (confirmed via raw spec + a live test call)
+
+`GeneDTO`'s name field is `symbolOfGene` (not `name`, not `geneSymbol` — yet
+another DTO-specific name, same inconsistency pattern as `/entity/disease`
+vs `/gda/summary`). It also has a `search_rank` field — **confirmed live to
+be `NaN` for every candidate**, identical to `/entity/disease`'s issue. Any
+gene free-text resolution must rank candidates the same way
+`_resolve_disease_id` already does (string similarity via
+`difflib.SequenceMatcher`), not by `search_rank`.
+
+`ChemicalDTO`'s name field is `chemPrefName`. Not live-tested for the
+`search_rank` issue, but given the identical pattern in both `DiseaseDTO` and
+`GeneDTO`, assume it's broken there too until proven otherwise rather than
+trusting it by default.
+
 ## Fix status
 
 **Implemented** in `biofetch/disgenet.py` (see that file's own docstring/comments):
@@ -90,9 +135,20 @@ description. Confirmed fields relevant to name resolution:
    shape, in case that ever turns out to be real for some other endpoint or
    error case not yet seen), mapping `diseaseName`, `geneNcbiID`, `score`,
    `numPMIDs`, `ei` from `/gda/summary`'s actual field names.
+5. `search_disgenet_enrichment(genes, id_type, max_results, api_key)` — new
+   tool wrapping `POST /enrichment/gene`. `id_type` maps to the right
+   `EnrichmentRequest` field (`symbol`→`geneHGNCList`, `ncbi`→`geneNCBIList`,
+   `ensembl`→`geneENSEMBLList`, `uniprot`→`geneUniProtList`). Live-tested with
+   `CFTR,BRCA1,TP53` — correct results, correct `intersection` sets, ordered
+   by ascending p-value as documented.
 
-Not implemented (deliberately out of scope for this pass — see capability
-table above): `/enrichment/gene` (gene-set enrichment, a new tool rather than
-a bug fix), `/entity/gene` and `/entity/chemical` free-text resolution (no
-current use case hitting that gap the way disease-name search did), `dda`/`vda`
-categories.
+Not yet implemented, but now verified and ready to build (see capability
+table + response-shape sections above):
+
+- `/entity/gene` and `/entity/chemical` free-text resolution — confirmed to
+  exist and work the same way `/entity/disease` does, `search_rank`-is-NaN
+  issue included. No current use case hitting this gap the way disease-name
+  search did, so still lower priority.
+
+Still unexplored, lower priority: `/gda/evidence`, `/gda/shared`, `dda`,
+`vda/*`, `/enrichment/variant`, embeddings.

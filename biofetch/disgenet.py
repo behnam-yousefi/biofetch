@@ -148,3 +148,86 @@ def search_disgenet(
         "associations": associations,
         "warnings":     warnings,
     }
+
+
+_ENRICHMENT_ID_FIELDS = {
+    "symbol":  "geneHGNCList",
+    "ncbi":    "geneNCBIList",
+    "ensembl": "geneENSEMBLList",
+    "uniprot": "geneUniProtList",
+}
+
+
+def search_disgenet_enrichment(
+    genes:       str,
+    id_type:     str = "symbol",   # "symbol" | "ncbi" | "ensembl" | "uniprot"
+    max_results: int = 50,
+    api_key:     str | None = None,
+) -> dict:
+    """
+    Gene-set enrichment analysis via DisGeNET: given a list of genes, finds
+    diseases whose known associated genes significantly overlap with it —
+    set-level reasoning, distinct from search_disgenet's single gene/disease
+    lookups. Useful for interpreting a gene signature or hit-list rather than
+    asking about one gene at a time.
+
+    genes:       comma-separated gene identifiers, matching id_type (e.g.
+                 'CFTR,BRCA1,TP53' for symbols), up to 4000.
+    id_type:     'symbol' (HGNC, default) | 'ncbi' | 'ensembl' | 'uniprot' —
+                 must match the format of `genes`.
+    max_results: maximum number of disease associations to return, ordered
+                 by ascending p-value (most significant first). DisGeNET can
+                 return thousands of rows for a broad gene set; this is a
+                 client-side cap, not a real pagination limit (no server-side
+                 pagination was hit in testing even at ~5000 results).
+    api_key:     DisGeNET API key. Falls back to DISGENET_API_KEY if not given.
+    """
+    api_key = api_key or os.getenv("DISGENET_API_KEY")
+    if not api_key:
+        return {
+            "n_results": 0, "is_complete": False, "associations": [],
+            "warnings": ["DISGENET_API_KEY not set. Register at https://disgenet.com"],
+        }
+
+    field = _ENRICHMENT_ID_FIELDS.get(id_type)
+    if field is None:
+        return {
+            "n_results": 0, "is_complete": False, "associations": [],
+            "warnings": [f"Unknown id_type '{id_type}'. Use one of: {', '.join(_ENRICHMENT_ID_FIELDS)}."],
+        }
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    resp = httpx.post(f"{BASE_URL}/enrichment/gene", json={field: genes}, headers=headers, timeout=30)
+    if resp.status_code == 404:
+        return {
+            "n_results": 0, "is_complete": True, "associations": [],
+            "warnings": [f"No enrichment results found for genes '{genes}'."],
+        }
+    resp.raise_for_status()
+    items = _extract_list(resp.json())
+
+    associations = []
+    for item in items[:max_results]:
+        associations.append({
+            "disease_name":                  item.get("diseaseName"),
+            "disease_umls_cui":              item.get("diseaseUMLSCUI"),
+            "pvalue":                        item.get("pvalue"),
+            "odds_ratio":                    item.get("oddsRatio"),
+            "odds_ratio_ci":                 item.get("oddsRatioCI"),
+            "intersection":                  item.get("intersection"),
+            "intersection_size":             item.get("intersectionSize"),
+            "n_genes_associated_to_disease": item.get("numGenesAssociatedToDisease"),
+            "source":                        item.get("source"),
+        })
+
+    is_complete = len(items) <= max_results
+    warnings    = []
+    if not is_complete:
+        warnings.append(f"Query matched {len(items)} disease associations; returning first {max_results} (ordered by ascending p-value).")
+
+    return {
+        "n_results":    len(items),
+        "is_complete":  is_complete,
+        "associations": associations,
+        "warnings":     warnings,
+    }
